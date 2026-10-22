@@ -26,6 +26,10 @@ LOG_FILE = "log.txt"
 LOG_FILE_MQTT = "log_mqtt.txt"
 LOG_FILE_DATA = "log_data.txt"
 
+STALE_AFTER = 60                # seconds without a valid status read before marking the boiler offline
+MQTT_MAX_DISCONNECTS = 15       # exit (and let systemd restart us) after this many disconnects...
+MQTT_DISCONNECT_WINDOW = 1800   # ...within this many seconds
+
 SENSORS = {
     "flow_temp": {
         "name": "Flow Temperature",
@@ -161,6 +165,8 @@ class MQTTHandler:
         # self.client.enable_logger(logger)
 
         self.setup_done = False
+        self.available = False
+        self.disconnect_times = []
         self.cached_sensor_values = {}  # Cache last published values to avoid sending out unnecessary messages to mqtt
 
     def connect(self):
@@ -181,13 +187,29 @@ class MQTTHandler:
                 self.setup_discovery()
                 self.setup_done = True
 
-            # Publish online status
-            self.client.publish(f"{MQTT_BASE_TOPIC}/status", "online", retain=True, qos=1)
+            self.publish_availability()
         else:
             logger.error(f"Connection to MQTT broker failed with result code {rc}")
 
     def on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
-        logger.info(f"Disconnected from MQTT broker")
+        logger.info(f"Disconnected from MQTT broker: {reason_code}")
+        self.disconnect_times.append(time.time())
+
+    def is_flapping(self):
+        """True when the MQTT connection keeps dropping (only a process restart has fixed this before)"""
+        cutoff = time.time() - MQTT_DISCONNECT_WINDOW
+        self.disconnect_times = [t for t in self.disconnect_times if t > cutoff]
+        return len(self.disconnect_times) >= MQTT_MAX_DISCONNECTS
+
+    def publish_availability(self):
+        self.client.publish(f"{MQTT_BASE_TOPIC}/status", "online" if self.available else "offline", retain=True, qos=1)
+
+    def set_available(self, available):
+        """Mark boiler data as (un)available in HA so stale values are not shown as current"""
+        if available != self.available:
+            self.available = available
+            logger.info(f"Boiler data {'available' if available else 'unavailable'}")
+            self.publish_availability()
 
     def setup_discovery(self):
         """Setup device and sensors discovery"""
@@ -213,8 +235,6 @@ class MQTTHandler:
 
     def publish_data(self, data):
         """Publish boiler data to MQTT topics only when values change"""
-        data_logger.debug(data)
-
         for sensor_id in SENSORS.keys():
             if sensor_id not in data:
                 logger.error(f"Missing data for sensor '{sensor_id}'")
@@ -478,30 +498,44 @@ def display_readings(data):
             print(f"{pretty_key}: {value}")
     print("\nPress Ctrl+C to stop...")
 
-def get_packet(port, mqtt_user, mqtt_password):
+def query(ser, command):
+    """Send a command and read its 32-byte response, discarding leftovers from earlier partial responses"""
+    ser.reset_input_buffer()
+    ser.write(command)
+    return ser.read(32)
+
+def get_packet(port, mqtt_user, mqtt_password, show_readings, log_data):
     mqtt_handler = MQTTHandler(mqtt_user, mqtt_password)
     mqtt_handler.connect()
     last_stats_time = 0
     parsed_status_data = {}
     parsed_status_extra_data = {}
     parsed_stats_data = {}
+    last_good_read = time.time()
 
     while True:  # outer serial reconnection loop
         try:
             with serial.Serial(port, 9600, timeout=2) as ser:
                 logger.info(f"Connected to {port}")
                 while True:
+                    if mqtt_handler.is_flapping():
+                        logger.error("MQTT connection keeps dropping, exiting so systemd restarts the service")
+                        sys.exit(1)
+
                     # Retrieve status
-                    ser.write(b'S?\r')
-                    data = ser.read(32)
+                    data = query(ser, b'S?\r')
                     if len(data) == 32:
                         parsed_status_data = parse_status_response(data)
+                        last_good_read = time.time()
                     else:
                         logger.error(f"Unexpected status response received: {len(data)} bytes")
+                        if time.time() - last_good_read >= STALE_AFTER:
+                            mqtt_handler.set_available(False)
+                        time.sleep(2)
+                        continue
 
                     # Retrieve status extra
-                    ser.write(b'S2\r')
-                    data = ser.read(32)
+                    data = query(ser, b'S2\r')
                     if len(data) == 32:
                         parsed_status_extra_data = parse_status_extra_response(data)
                     else:
@@ -511,25 +545,30 @@ def get_packet(port, mqtt_user, mqtt_password):
                     current_time = time.time()
                     if current_time - last_stats_time >= 60:
                         last_stats_time = current_time
-                        ser.write(b'HN\r')
-                        data = ser.read(32)
+                        data = query(ser, b'HN\r')
                         if len(data) == 32:
                             parsed_stats_data = parse_stats_response(data)
                         else:
                             logger.error(f"Unexpected stats response received: {len(data)} bytes")
 
                     aggregated_data = parsed_status_data | parsed_status_extra_data | parsed_stats_data
-                    display_readings(aggregated_data)
+                    if show_readings:
+                        display_readings(aggregated_data)
+                    if log_data:
+                        data_logger.debug(aggregated_data)
                     mqtt_handler.publish_data(aggregated_data)
+                    mqtt_handler.set_available(True)
 
                     time.sleep(2)
 
         except serial.SerialException as e:
             logger.error(f"Serial connection lost: {e}")
+            mqtt_handler.set_available(False)
             time.sleep(10)
             continue
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
+            mqtt_handler.set_available(False)
             time.sleep(10)
             continue
 
@@ -577,10 +616,12 @@ if __name__ == '__main__':
     parser.add_argument('--mqtt-user', required=True, help='MQTT username')
     parser.add_argument('--mqtt-password', required=True, help='MQTT password')
     parser.add_argument('--port', required=True, help='Serial port')
+    parser.add_argument('--log-data', action='store_true', help=f'Log every reading to {LOG_FILE_DATA} (heavy SD card writes)')
     args = parser.parse_args()
 
     logger = make_general_logger()
     mqtt_logger = make_mqtt_logger()
     data_logger = make_data_logger()
 
-    get_packet(args.port, args.mqtt_user, args.mqtt_password)
+    # Only redraw the readings on an interactive terminal; under systemd stdout goes to the journal
+    get_packet(args.port, args.mqtt_user, args.mqtt_password, sys.stdout.isatty(), args.log_data)
