@@ -199,8 +199,11 @@ BOILER_SETTINGS_V1 = [
     (21, "installer_param_P_dot", "Param P. - Hot Water Output Value", None),
 ]
 
+SETTINGS_SENSOR_IDS = set()   # published under a separate "settings" device so the boiler device stays short
+
 for setting_id, name, unit in BOILER_SETTINGS + [(i, n, u) for _, i, n, u in BOILER_SETTINGS_V1]:
     if name:
+        SETTINGS_SENSOR_IDS.add(setting_id)
         SENSORS[setting_id] = {
             "name": name,
             "device_class": "temperature" if unit == "°C" else None,
@@ -281,11 +284,18 @@ class MQTTHandler:
             "model": DEVICE_MODEL,
             "manufacturer": DEVICE_MANUFACTURER
         }
+        settings_device_info = {
+            "identifiers": [f"{DEVICE_ID}_settings"],
+            "name": f"{DEVICE_NAME} Settings",
+            "model": DEVICE_MODEL,
+            "manufacturer": DEVICE_MANUFACTURER,
+            "via_device": DEVICE_ID
+        }
 
         # Register sensors
         for sensor_id, config in SENSORS.items():
             config["unique_id"] = sensor_id
-            config["device"] = device_info
+            config["device"] = settings_device_info if sensor_id in SETTINGS_SENSOR_IDS else device_info
             config["state_topic"] = f"{MQTT_BASE_TOPIC}/{sensor_id}/state"
             config["availability_topic"] = f"{MQTT_BASE_TOPIC}/status"
 
