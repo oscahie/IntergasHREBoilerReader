@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 import json
+import math
 import paho.mqtt.client as mqtt
 from struct import *
 from logging.handlers import RotatingFileHandler
@@ -66,7 +67,7 @@ SENSORS = {
         "device_class": "power_factor",
         "unit_of_measurement": "%",
         "state_class": "measurement",
-        "accuracy_decimals": 0,
+        "suggested_display_precision": 0,
         "icon": "mdi:pump"
     },
     "status": {
@@ -81,7 +82,7 @@ SENSORS = {
         "unit_of_measurement": "m³",
         "state_class": "total_increasing",
         "icon": "mdi:meter-gas",
-        "accuracy_decimals": 3
+        "suggested_display_precision": 3
     },
     "gas_meter_hot_water": {
         "name": "Gas meter (hot water)",
@@ -89,14 +90,14 @@ SENSORS = {
         "unit_of_measurement": "m³",
         "state_class": "total_increasing",
         "icon": "mdi:meter-gas",
-        "accuracy_decimals": 3
+        "suggested_display_precision": 3
     },
     "ionisation_current": {
         "name": "Ionisation Current",
         "device_class": None,
         "unit_of_measurement": "µA",
         "state_class": "measurement",
-        "accuracy_decimals": 2
+        "suggested_display_precision": 2
     },
     "alarm_status": {
         "name": "Alarm Status",
@@ -243,7 +244,8 @@ class MQTTHandler:
             value = data[sensor_id]
             topic = f"{MQTT_BASE_TOPIC}/{sensor_id}/state"
 
-            current_state = str(value)
+            # HA's MQTT sensor treats the payload "None" as unknown; "nan" would be rejected by numeric sensors
+            current_state = "None" if isinstance(value, float) and math.isnan(value) else str(value)
             if sensor_id not in self.cached_sensor_values or current_state != self.cached_sensor_values[sensor_id]:
                 try:
                     result = self.client.publish(
