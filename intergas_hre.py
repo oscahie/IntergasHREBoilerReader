@@ -26,7 +26,7 @@ LOG_FILE = "log.txt"
 LOG_FILE_MQTT = "log_mqtt.txt"
 LOG_FILE_DATA = "log_data.txt"
 
-MAX_FAILED_READS = 3            # consecutive failed status reads before marking the boiler offline
+STALE_AFTER = 60                # seconds without a valid status read before marking the boiler offline
 MQTT_MAX_DISCONNECTS = 15       # exit (and let systemd restart us) after this many disconnects...
 MQTT_DISCONNECT_WINDOW = 1800   # ...within this many seconds
 
@@ -511,7 +511,7 @@ def get_packet(port, mqtt_user, mqtt_password, show_readings, log_data):
     parsed_status_data = {}
     parsed_status_extra_data = {}
     parsed_stats_data = {}
-    failed_reads = 0
+    last_good_read = time.time()
 
     while True:  # outer serial reconnection loop
         try:
@@ -526,11 +526,10 @@ def get_packet(port, mqtt_user, mqtt_password, show_readings, log_data):
                     data = query(ser, b'S?\r')
                     if len(data) == 32:
                         parsed_status_data = parse_status_response(data)
-                        failed_reads = 0
+                        last_good_read = time.time()
                     else:
                         logger.error(f"Unexpected status response received: {len(data)} bytes")
-                        failed_reads += 1
-                        if failed_reads >= MAX_FAILED_READS:
+                        if time.time() - last_good_read >= STALE_AFTER:
                             mqtt_handler.set_available(False)
                         time.sleep(2)
                         continue
