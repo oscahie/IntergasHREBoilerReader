@@ -4,6 +4,7 @@ This project started as a fork of https://github.com/rixvet/IntergasBoilerReader
 
 Features:
 - Reads and displays in the console most of the known data available for the HRE boiler (state, extra state and runtime stats commands).
+- Reads the boiler settings (temperature settings, comfort mode and installer parameters) at startup and every 15 minutes. It never writes them.
 - The most relevant data is published to an MQTT broker as sensors bundled in a boiler device that is auto-discovered by Home Assistant.
 - Much improved error handling, data logging and reconnection logic.
 

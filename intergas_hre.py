@@ -30,6 +30,7 @@ LOG_FILE_DATA = "log_data.txt"
 STALE_AFTER = 60                # seconds without a valid status read before marking the boiler offline
 MQTT_MAX_DISCONNECTS = 15       # exit (and let systemd restart us) after this many disconnects...
 MQTT_DISCONNECT_WINDOW = 1800   # ...within this many seconds
+SETTINGS_INTERVAL = 900         # seconds between reads of the boiler settings (V?)
 
 SENSORS = {
     "flow_temp": {
@@ -149,6 +150,55 @@ SENSORS = {
         "icon": "mdi:gas-burner"
     }
 }
+
+# Layout of the V? response: one signed byte per setting, in this order. The order comes from the
+# community reverse engineering of Intergas' IDS software and matches the parameter list in the HRE manual.
+# Entries with a name are published to HA; installer parameters keep their manual code in the name.
+BOILER_SETTINGS = [
+    ("heater_on", None, None),
+    ("comfort_mode", "Hot Water Comfort Mode", None),
+    ("ch_set_max", "Max Heating Temperature Setting", "°C"),
+    ("dhw_set", "Hot Water Temperature Setting", "°C"),
+    ("eco_days", "Eco Days", None),
+    ("comfort_set", None, None),
+    ("dhw_at_night", None, None),
+    ("ch_at_night", None, None),
+    ("installer_param_1", "Param 1 - Installation Type", None),
+    ("installer_param_2", "Param 2 - Heating Pump Mode", None),
+    ("installer_param_3", "Param 3 - Max Heating Power", "%"),
+    ("installer_param_4", "Param 4 - Max Hot Water Power", "%"),
+    ("installer_param_5", "Param 5 - Heating Curve Min Flow Temperature", "°C"),
+    ("installer_param_6", "Param 6 - Heating Curve Min Outside Temperature", "°C"),
+    ("installer_param_7", "Param 7 - Heating Curve Max Outside Temperature", "°C"),
+    ("installer_param_8", "Param 8 - Pump Post-Run Time", "min"),
+    ("installer_param_9", "Param 9 - Pump Post-Run Time After Hot Water", "min"),
+    ("installer_param_A", None, None),   # not applicable to Kombi Kompakt
+    ("installer_param_b", "Param b - Booster", None),
+    ("installer_param_C", "Param C - Step Modulation", None),
+    ("installer_param_c", "Param c - Min Heating Fan Speed", "%"),
+    ("installer_param_d", "Param d - Min Hot Water Fan Speed", "%"),
+    ("installer_param_E", "Param E - Min Flow Temperature on OpenTherm Demand", "°C"),
+    ("installer_param_E_dot", "Param E. - OpenTherm Response", None),
+    ("installer_param_F", "Param F - Heating Start Fan Speed", "%"),
+    ("installer_param_H", "Param H - Max Fan Speed", None),
+    ("installer_param_n", "Param n - Flow Temperature While Heating External Tank", "°C"),
+    ("installer_param_o", "Param o - Heating Demand Delay After Hot Water", "min"),
+    ("installer_param_P", "Param P - Anti-Cycle Time", "min"),
+    ("installer_param_r", "Param r - Heating Curve Coefficient", None),
+    ("installer_param_F_dot", "Param F. - Hot Water Start Fan Speed", "%"),
+]
+
+for setting_id, name, unit in BOILER_SETTINGS:
+    if name:
+        SENSORS[setting_id] = {
+            "name": name,
+            "device_class": "temperature" if unit == "°C" else None,
+            "unit_of_measurement": unit,
+            "state_class": None,
+            "icon": "mdi:cog"
+        }
+        if setting_id.startswith("installer_"):
+            SENSORS[setting_id]["entity_category"] = "diagnostic"
 
 class MQTTHandler:
     def __init__(self, mqtt_user, mqtt_password):
@@ -457,6 +507,9 @@ def parse_stats_response(s):
         'reset_count': reset_count
     }
 
+def parse_settings_response(s):
+    return {setting_id: s[i] - 256 if s[i] > 127 else s[i] for i, (setting_id, _, _) in enumerate(BOILER_SETTINGS)}
+
 def prettify_key(key):
     return ' '.join(word.capitalize() for word in key.split('_'))
 
@@ -502,6 +555,9 @@ def display_readings(data):
 
 def query(ser, command):
     """Send a command and read its 32-byte response, discarding leftovers from earlier partial responses"""
+    if command.startswith(b'P'):
+        # 'P' + index + value writes a boiler parameter; this script only reads
+        raise ValueError(f"Refusing to send write command {command!r}")
     ser.reset_input_buffer()
     ser.write(command)
     return ser.read(32)
@@ -510,9 +566,11 @@ def get_packet(port, mqtt_user, mqtt_password, show_readings, log_data):
     mqtt_handler = MQTTHandler(mqtt_user, mqtt_password)
     mqtt_handler.connect()
     last_stats_time = 0
+    last_settings_time = 0
     parsed_status_data = {}
     parsed_status_extra_data = {}
     parsed_stats_data = {}
+    parsed_settings_data = {}
     last_good_read = time.time()
 
     while True:  # outer serial reconnection loop
@@ -553,7 +611,16 @@ def get_packet(port, mqtt_user, mqtt_password, show_readings, log_data):
                         else:
                             logger.error(f"Unexpected stats response received: {len(data)} bytes")
 
-                    aggregated_data = parsed_status_data | parsed_status_extra_data | parsed_stats_data
+                    # Retrieve settings at startup and every 15 minutes, retrying on the next loop if the read fails
+                    if current_time - last_settings_time >= SETTINGS_INTERVAL:
+                        data = query(ser, b'V?\r')
+                        if len(data) == 32:
+                            parsed_settings_data = parse_settings_response(data)
+                            last_settings_time = current_time
+                        else:
+                            logger.error(f"Unexpected settings response received: {len(data)} bytes")
+
+                    aggregated_data = parsed_status_data | parsed_status_extra_data | parsed_stats_data | parsed_settings_data
                     if show_readings:
                         display_readings(aggregated_data)
                     if log_data:
