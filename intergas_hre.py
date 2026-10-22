@@ -153,7 +153,7 @@ SENSORS = {
 
 # Layout of the V? response: one signed byte per setting, in this order. The order comes from the
 # community reverse engineering of Intergas' IDS software and matches the iC3 parameter list for the HRE.
-# The iC3-only parameters (3., 5., c., L, O., P., q) are not part of this response.
+# The iC3-only parameters (3., 5., c., L, O., P., q) are not part of this response, see BOILER_SETTINGS_V1.
 # Entries with a name are published to HA; installer parameters keep their manual code in the name.
 BOILER_SETTINGS = [
     ("heater_on", None, None),
@@ -189,7 +189,17 @@ BOILER_SETTINGS = [
     ("installer_param_F_dot", "Param F. - Fan Speed During Hot Water Ignition", "%"),
 ]
 
-for setting_id, name, unit in BOILER_SETTINGS:
+# iC3-only parameters in the V1 response, as (byte, id, name, unit). Located by changing each parameter on the
+# display and re-reading; L, n. and q are still unknown. 3. and c. read 100 where the display shows 99.
+BOILER_SETTINGS_V1 = [
+    (6, "installer_param_O_dot", "Param O. - Heating Demand Delay", "min"),
+    (16, "installer_param_5_dot", "Param 5. - Max Heating Temperature for User", "°C"),
+    (19, "installer_param_c_dot", "Param c. - Min Pump Power", "%"),
+    (20, "installer_param_3_dot", "Param 3. - Max Pump Power", "%"),
+    (21, "installer_param_P_dot", "Param P. - Hot Water Output Value", None),
+]
+
+for setting_id, name, unit in BOILER_SETTINGS + [(i, n, u) for _, i, n, u in BOILER_SETTINGS_V1]:
     if name:
         SENSORS[setting_id] = {
             "name": name,
@@ -513,6 +523,9 @@ def parse_settings_response(s):
     data['comfort_mode'] = {0: "Off"}.get(data['comfort_mode'], data['comfort_mode'])   # other values not confirmed yet
     return data
 
+def parse_settings_v1_response(s):
+    return {setting_id: s[i] - 256 if s[i] > 127 else s[i] for i, setting_id, _, _ in BOILER_SETTINGS_V1}
+
 def prettify_key(key):
     return ' '.join(word.capitalize() for word in key.split('_'))
 
@@ -617,11 +630,12 @@ def get_packet(port, mqtt_user, mqtt_password, show_readings, log_data):
                     # Retrieve settings at startup and every 15 minutes, retrying on the next loop if the read fails
                     if current_time - last_settings_time >= SETTINGS_INTERVAL:
                         data = query(ser, b'V?\r')
-                        if len(data) == 32:
-                            parsed_settings_data = parse_settings_response(data)
+                        data_v1 = query(ser, b'V1\r')
+                        if len(data) == 32 and len(data_v1) == 32:
+                            parsed_settings_data = parse_settings_response(data) | parse_settings_v1_response(data_v1)
                             last_settings_time = current_time
                         else:
-                            logger.error(f"Unexpected settings response received: {len(data)} bytes")
+                            logger.error(f"Unexpected settings response received: {len(data)} and {len(data_v1)} bytes")
 
                     aggregated_data = parsed_status_data | parsed_status_extra_data | parsed_stats_data | parsed_settings_data
                     if show_readings:
