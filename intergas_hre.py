@@ -152,7 +152,8 @@ SENSORS = {
 }
 
 # Layout of the V? response: one signed byte per setting, in this order. The order comes from the
-# community reverse engineering of Intergas' IDS software and matches the parameter list in the HRE manual.
+# community reverse engineering of Intergas' IDS software and matches the iC3 parameter list for the HRE.
+# The iC3-only parameters (3., 5., c., L, O., P., q) are not part of this response.
 # Entries with a name are published to HA; installer parameters keep their manual code in the name.
 BOILER_SETTINGS = [
     ("heater_on", None, None),
@@ -172,20 +173,20 @@ BOILER_SETTINGS = [
     ("installer_param_7", "Param 7 - Heating Curve Max Outside Temperature", "°C"),
     ("installer_param_8", "Param 8 - Pump Post-Run Time", "min"),
     ("installer_param_9", "Param 9 - Pump Post-Run Time After Hot Water", "min"),
-    ("installer_param_A", None, None),   # not applicable to Kombi Kompakt
-    ("installer_param_b", "Param b - Booster", None),
-    ("installer_param_C", "Param C - Step Modulation", None),
-    ("installer_param_c", "Param c - Min Heating Fan Speed", "%"),
-    ("installer_param_d", "Param d - Min Hot Water Fan Speed", "%"),
+    ("installer_param_A", "Param A - X2 Pin 5 Output", None),
+    ("installer_param_b", None, None),   # not used
+    ("installer_param_C", "Param C - Heating Pump Modulation", None),
+    ("installer_param_c", "Param c - Min Heating Power", "%"),
+    ("installer_param_d", "Param d - Min Hot Water Power", "%"),
     ("installer_param_E", "Param E - Min Flow Temperature on OpenTherm Demand", "°C"),
     ("installer_param_E_dot", "Param E. - OpenTherm Response", None),
-    ("installer_param_F", "Param F - Heating Start Fan Speed", "%"),
+    ("installer_param_F", "Param F - Fan Speed During Heating Ignition", "%"),
     ("installer_param_H", "Param H - Max Fan Speed", None),
-    ("installer_param_n", "Param n - Flow Temperature While Heating External Tank", "°C"),
+    ("installer_param_n", "Param n - Max Flow Setpoint as System Boiler", "°C"),
     ("installer_param_o", "Param o - Heating Demand Delay After Hot Water", "min"),
     ("installer_param_P", "Param P - Anti-Cycle Time", "min"),
     ("installer_param_r", "Param r - Heating Curve Coefficient", None),
-    ("installer_param_F_dot", "Param F. - Hot Water Start Fan Speed", "%"),
+    ("installer_param_F_dot", "Param F. - Fan Speed During Hot Water Ignition", "%"),
 ]
 
 for setting_id, name, unit in BOILER_SETTINGS:
@@ -508,7 +509,9 @@ def parse_stats_response(s):
     }
 
 def parse_settings_response(s):
-    return {setting_id: s[i] - 256 if s[i] > 127 else s[i] for i, (setting_id, _, _) in enumerate(BOILER_SETTINGS)}
+    data = {setting_id: s[i] - 256 if s[i] > 127 else s[i] for i, (setting_id, _, _) in enumerate(BOILER_SETTINGS)}
+    data['comfort_mode'] = {0: "Off"}.get(data['comfort_mode'], data['comfort_mode'])   # other values not confirmed yet
+    return data
 
 def prettify_key(key):
     return ' '.join(word.capitalize() for word in key.split('_'))
