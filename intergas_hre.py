@@ -520,7 +520,7 @@ def parse_stats_response(s):
 
 def parse_settings_response(s):
     data = {setting_id: s[i] - 256 if s[i] > 127 else s[i] for i, (setting_id, _, _) in enumerate(BOILER_SETTINGS)}
-    data['comfort_mode'] = {0: "Off"}.get(data['comfort_mode'], data['comfort_mode'])   # other values not confirmed yet
+    data['comfort_mode'] = {0: "Off", 1: "On"}.get(data['comfort_mode'], data['comfort_mode'])   # eco not confirmed yet
     return data
 
 def parse_settings_v1_response(s):
