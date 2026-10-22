@@ -30,6 +30,7 @@ LOG_FILE_DATA = "log_data.txt"
 STALE_AFTER = 60                # seconds without a valid status read before marking the boiler offline
 MQTT_MAX_DISCONNECTS = 15       # exit (and let systemd restart us) after this many disconnects...
 MQTT_DISCONNECT_WINDOW = 1800   # ...within this many seconds
+SETTINGS_INTERVAL = 900         # seconds between reads of the boiler settings (V?)
 
 SENSORS = {
     "flow_temp": {
@@ -150,6 +151,69 @@ SENSORS = {
     }
 }
 
+# Layout of the V? response: one signed byte per setting, in this order. The order comes from the
+# community reverse engineering of Intergas' IDS software and matches the iC3 parameter list for the HRE.
+# The iC3-only parameters (3., 5., c., L, O., P., q) are not part of this response, see BOILER_SETTINGS_V1.
+# Entries with a name are published to HA; installer parameters keep their manual code in the name.
+BOILER_SETTINGS = [
+    ("heater_on", None, None),
+    ("comfort_mode", "Hot Water Comfort Mode", None),
+    ("ch_set_max", "Max Heating Temperature Setting", "°C"),
+    ("dhw_set", "Hot Water Temperature Setting", "°C"),
+    ("eco_days", "Eco Days", None),
+    ("comfort_set", None, None),
+    ("dhw_at_night", None, None),
+    ("ch_at_night", None, None),
+    ("installer_param_1", "Param 1 - Installation Type", None),
+    ("installer_param_2", "Param 2 - Heating Pump Mode", None),
+    ("installer_param_3", "Param 3 - Max Heating Power", "%"),
+    ("installer_param_4", "Param 4 - Max Hot Water Power", "%"),
+    ("installer_param_5", "Param 5 - Heating Curve Min Flow Temperature", "°C"),
+    ("installer_param_6", "Param 6 - Heating Curve Min Outside Temperature", "°C"),
+    ("installer_param_7", "Param 7 - Heating Curve Max Outside Temperature", "°C"),
+    ("installer_param_8", "Param 8 - Pump Post-Run Time", "min"),
+    ("installer_param_9", "Param 9 - Pump Post-Run Time After Hot Water", "min"),
+    ("installer_param_A", "Param A - X2 Pin 5 Output", None),
+    ("installer_param_b", None, None),   # not used
+    ("installer_param_C", "Param C - Heating Pump Modulation", None),
+    ("installer_param_c", "Param c - Min Heating Power", "%"),
+    ("installer_param_d", "Param d - Min Hot Water Power", "%"),
+    ("installer_param_E", "Param E - Min Flow Temperature on OpenTherm Demand", "°C"),
+    ("installer_param_E_dot", "Param E. - OpenTherm Response", None),
+    ("installer_param_F", "Param F - Fan Speed During Heating Ignition", "%"),
+    ("installer_param_H", "Param H - Max Fan Speed", None),
+    ("installer_param_n", "Param n - Max Flow Setpoint as System Boiler", "°C"),
+    ("installer_param_o", "Param o - Heating Demand Delay After Hot Water", "min"),
+    ("installer_param_P", "Param P - Anti-Cycle Time", "min"),
+    ("installer_param_r", "Param r - Heating Curve Coefficient", None),
+    ("installer_param_F_dot", "Param F. - Fan Speed During Hot Water Ignition", "%"),
+]
+
+# iC3-only parameters in the V1 response, as (byte, id, name, unit). Located by changing each parameter on the
+# display and re-reading; L, n. and q are still unknown. 3. and c. read 100 where the display shows 99.
+BOILER_SETTINGS_V1 = [
+    (6, "installer_param_O_dot", "Param O. - Heating Demand Delay", "min"),
+    (16, "installer_param_5_dot", "Param 5. - Max Heating Temperature for User", "°C"),
+    (19, "installer_param_c_dot", "Param c. - Min Pump Power", "%"),
+    (20, "installer_param_3_dot", "Param 3. - Max Pump Power", "%"),
+    (21, "installer_param_P_dot", "Param P. - Hot Water Output Value", None),
+]
+
+SETTINGS_SENSOR_IDS = set()   # published under a separate "settings" device so the boiler device stays short
+
+for setting_id, name, unit in BOILER_SETTINGS + [(i, n, u) for _, i, n, u in BOILER_SETTINGS_V1]:
+    if name:
+        SETTINGS_SENSOR_IDS.add(setting_id)
+        SENSORS[setting_id] = {
+            "name": name,
+            "device_class": "temperature" if unit == "°C" else None,
+            "unit_of_measurement": unit,
+            "state_class": None,
+            "icon": "mdi:cog"
+        }
+        if setting_id.startswith("installer_"):
+            SENSORS[setting_id]["entity_category"] = "diagnostic"
+
 class MQTTHandler:
     def __init__(self, mqtt_user, mqtt_password):
         logger.info("Initializing MQTT client...")
@@ -220,11 +284,18 @@ class MQTTHandler:
             "model": DEVICE_MODEL,
             "manufacturer": DEVICE_MANUFACTURER
         }
+        settings_device_info = {
+            "identifiers": [f"{DEVICE_ID}_settings"],
+            "name": f"{DEVICE_NAME} Settings",
+            "model": DEVICE_MODEL,
+            "manufacturer": DEVICE_MANUFACTURER,
+            "via_device": DEVICE_ID
+        }
 
         # Register sensors
         for sensor_id, config in SENSORS.items():
             config["unique_id"] = sensor_id
-            config["device"] = device_info
+            config["device"] = settings_device_info if sensor_id in SETTINGS_SENSOR_IDS else device_info
             config["state_topic"] = f"{MQTT_BASE_TOPIC}/{sensor_id}/state"
             config["availability_topic"] = f"{MQTT_BASE_TOPIC}/status"
 
@@ -457,6 +528,14 @@ def parse_stats_response(s):
         'reset_count': reset_count
     }
 
+def parse_settings_response(s):
+    data = {setting_id: s[i] - 256 if s[i] > 127 else s[i] for i, (setting_id, _, _) in enumerate(BOILER_SETTINGS)}
+    data['comfort_mode'] = {0: "Off", 1: "On"}.get(data['comfort_mode'], data['comfort_mode'])   # eco not confirmed yet
+    return data
+
+def parse_settings_v1_response(s):
+    return {setting_id: s[i] - 256 if s[i] > 127 else s[i] for i, setting_id, _, _ in BOILER_SETTINGS_V1}
+
 def prettify_key(key):
     return ' '.join(word.capitalize() for word in key.split('_'))
 
@@ -502,6 +581,9 @@ def display_readings(data):
 
 def query(ser, command):
     """Send a command and read its 32-byte response, discarding leftovers from earlier partial responses"""
+    if command.startswith(b'P'):
+        # 'P' + index + value writes a boiler parameter; this script only reads
+        raise ValueError(f"Refusing to send write command {command!r}")
     ser.reset_input_buffer()
     ser.write(command)
     return ser.read(32)
@@ -510,9 +592,11 @@ def get_packet(port, mqtt_user, mqtt_password, show_readings, log_data):
     mqtt_handler = MQTTHandler(mqtt_user, mqtt_password)
     mqtt_handler.connect()
     last_stats_time = 0
+    last_settings_time = 0
     parsed_status_data = {}
     parsed_status_extra_data = {}
     parsed_stats_data = {}
+    parsed_settings_data = {}
     last_good_read = time.time()
 
     while True:  # outer serial reconnection loop
@@ -553,7 +637,17 @@ def get_packet(port, mqtt_user, mqtt_password, show_readings, log_data):
                         else:
                             logger.error(f"Unexpected stats response received: {len(data)} bytes")
 
-                    aggregated_data = parsed_status_data | parsed_status_extra_data | parsed_stats_data
+                    # Retrieve settings at startup and every 15 minutes, retrying on the next loop if the read fails
+                    if current_time - last_settings_time >= SETTINGS_INTERVAL:
+                        data = query(ser, b'V?\r')
+                        data_v1 = query(ser, b'V1\r')
+                        if len(data) == 32 and len(data_v1) == 32:
+                            parsed_settings_data = parse_settings_response(data) | parse_settings_v1_response(data_v1)
+                            last_settings_time = current_time
+                        else:
+                            logger.error(f"Unexpected settings response received: {len(data)} and {len(data_v1)} bytes")
+
+                    aggregated_data = parsed_status_data | parsed_status_extra_data | parsed_stats_data | parsed_settings_data
                     if show_readings:
                         display_readings(aggregated_data)
                     if log_data:
