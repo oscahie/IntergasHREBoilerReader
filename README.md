@@ -55,7 +55,7 @@ WorkingDirectory=/home/pi/IntergasHREBoilerReader
 Type=simple
 ExecStart=/usr/bin/screen -DmS boiler /usr/bin/python3 /home/pi/IntergasHREBoilerReader/intergas_hre.py --mqtt-user <user> --mqtt-password <password> --port /dev/ttyUSB0
 ExecStop=/usr/bin/screen -S boiler -X quit
-Restart=on-failure
+Restart=always
 RestartSec=10
 
 [Install]
