@@ -30,6 +30,7 @@ LOG_FILE_DATA = "log_data.txt"
 STALE_AFTER = 60                # seconds without a valid status read before marking the boiler offline
 MQTT_MAX_DISCONNECTS = 15       # exit (and let systemd restart us) after this many disconnects...
 MQTT_DISCONNECT_WINDOW = 1800   # ...within this many seconds
+MQTT_MAX_OFFLINE = 300          # exit (and let systemd restart us) after this many seconds without a broker connection
 SETTINGS_INTERVAL = 900         # seconds between reads of the boiler settings (V?)
 
 SENSORS = {
@@ -225,6 +226,7 @@ class MQTTHandler:
         self.client.username_pw_set(mqtt_user, mqtt_password)
         self.client.on_connect = self.on_connect
         self.client.on_disconnect = self.on_disconnect
+        self.client.on_connect_fail = self.on_connect_fail
         self.client.will_set(f"{MQTT_BASE_TOPIC}/status", "offline", retain=True)
         self.client.reconnect_delay_set(min_delay=1, max_delay=300)
         # self.client.enable_logger(logger)
@@ -232,6 +234,7 @@ class MQTTHandler:
         self.setup_done = False
         self.available = False
         self.disconnect_times = []
+        self.disconnected_since = None
         self.cached_sensor_values = {}  # Cache last published values to avoid sending out unnecessary messages to mqtt
 
     def connect(self):
@@ -245,6 +248,7 @@ class MQTTHandler:
     def on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
             logger.info("Connected to MQTT broker successfully")
+            self.disconnected_since = None
             # Clear cached values on reconnect to force republishing sensor states
             self.cached_sensor_values = {}
 
@@ -259,12 +263,21 @@ class MQTTHandler:
     def on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
         logger.info(f"Disconnected from MQTT broker: {reason_code}")
         self.disconnect_times.append(time.time())
+        if self.disconnected_since is None:
+            self.disconnected_since = time.time()
+
+    def on_connect_fail(self, client, userdata):
+        logger.warning("Reconnecting to MQTT broker failed, retrying")
 
     def is_flapping(self):
         """True when the MQTT connection keeps dropping (only a process restart has fixed this before)"""
         cutoff = time.time() - MQTT_DISCONNECT_WINDOW
         self.disconnect_times = [t for t in self.disconnect_times if t > cutoff]
         return len(self.disconnect_times) >= MQTT_MAX_DISCONNECTS
+
+    def is_stuck_offline(self):
+        """True when the broker connection has been down too long (e.g. the broker hostname stopped resolving)"""
+        return self.disconnected_since is not None and time.time() - self.disconnected_since >= MQTT_MAX_OFFLINE
 
     def publish_availability(self):
         self.client.publish(f"{MQTT_BASE_TOPIC}/status", "online" if self.available else "offline", retain=True, qos=1)
@@ -606,6 +619,9 @@ def get_packet(port, mqtt_user, mqtt_password, show_readings, log_data):
                 while True:
                     if mqtt_handler.is_flapping():
                         logger.error("MQTT connection keeps dropping, exiting so systemd restarts the service")
+                        sys.exit(1)
+                    if mqtt_handler.is_stuck_offline():
+                        logger.error(f"No MQTT connection for {MQTT_MAX_OFFLINE} seconds, exiting so systemd restarts the service")
                         sys.exit(1)
 
                     # Retrieve status
