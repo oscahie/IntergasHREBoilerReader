@@ -38,7 +38,7 @@ Edit the MQTT details, host, port and client ID in the python script, and prefer
 
 The readings are redrawn in the console only when it is an interactive terminal (e.g. inside `screen`), so they don't flood the systemd journal. Add `--log-data` to also log every reading to `log_data.txt`; it is off by default because it writes a lot to the SD card.
 
-If the boiler stops answering for 60 seconds, or the serial port disappears, the sensors are marked unavailable in HA instead of keeping their last values. If the MQTT connection drops 15 times within 30 minutes, the script exits so systemd can restart it.
+If the boiler stops answering for 60 seconds, or the serial port disappears, the sensors are marked unavailable in HA instead of keeping their last values. If the MQTT connection drops 15 times within 30 minutes, or stays down for 5 minutes, the script exits so systemd can restart it. Failed reconnection attempts are logged.
 
 For 24x7 runnning and launching automatically after booting I created a new `systemd` service and rely on `screen` to handle persistent sessions that I can attach to if needed.
 
