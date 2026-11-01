@@ -394,6 +394,58 @@ def getInt24(b1, b2, b3):
 def get_bool(data, bit):
     return bool(data & (1 << bit))
 
+# Byte 24 of the S? response holds the boiler's operating mode (which demand it is serving), not the digit on
+# its service display. Values from observation and from Intergas' own gateway (as decoded by incomfort-client).
+STATUS_CODES = {
+    0: "Central Heating active",            # heat demand over OpenTherm
+    15: "Central Heating active",           # external boiler demand
+    24: "Frost protection",
+    37: "Central Heating active",           # RF thermostat demand
+    51: "Hot water ramp down",
+    85: "Sensor test",
+    102: "Central Heating health-check",    # anti-blockade run once every 24 hours
+    103: "Central Heating setpoint reached",
+    104: "Central Heating low load",
+    126: "Idle",
+    127: "Off",
+    153: "Hot water storage ramp down",
+    170: "Service mode",
+    204: "Hot water active",
+    230: "Central Heating starting",
+    231: "Central Heating ramp down",       # water recirculation after each heating period
+    240: "Hot water storage heating",
+    255: "Buffer heating",
+}
+
+# Modes in which the burner is wanted; within them the burner phase is taken from the gas valve, spark and fan
+DEMAND_CODES = {0: "Central Heating", 15: "Central Heating", 37: "Central Heating", 204: "Hot water", 240: "Hot water storage"}
+
+FAN_RUNNING_RPM = 300   # below this the fan is considered stopped
+
+seen_status_codes = set()
+
+def describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch):
+    """Combine the mode in byte 24 with the burner flags into the phase the service display shows:
+    ignition, burning, fan purge (before ignition or after the flame goes out) or setpoint reached."""
+    if displ_code not in seen_status_codes:
+        seen_status_codes.add(displ_code)
+        logger.info(f"Status code {displ_code} seen (gas valve {gas_valve}, spark {spark}, fan {fan_speed} rpm, tap {tap_switch})")
+
+    mode = DEMAND_CODES.get(displ_code)
+    if mode is None:
+        if displ_code not in STATUS_CODES:
+            return f"Unknown ({displ_code})"
+        if not gas_valve and fan_speed >= FAN_RUNNING_RPM and displ_code not in (85, 170):
+            return "Fan purge"
+        return STATUS_CODES[displ_code]
+    if spark:
+        return f"{mode} ignition"
+    if gas_valve:
+        return f"{mode} active"
+    if fan_speed >= FAN_RUNNING_RPM:
+        return f"{mode} fan purge"
+    return f"{mode} setpoint reached"
+
 def parse_status_response(s):
     heat_exchanger_temp = getTemp(s[1],s[0])    # not 100% sure it's heat exchanger, could be flue gas temp
     flow_temp = getTemp(s[3], s[2])
@@ -446,17 +498,7 @@ def parse_status_response(s):
     if outside_temp < -50:
         outside_temp = "N/A"
 
-    # Add status code interpretation
-    status_codes = {
-        51: "Hot water ramp down",
-        0: "Central Heating active",
-        102: "Central Heating health-check",    # anti-blockade run once every 24 hours
-        126: "Idle",
-        170: "Service mode",
-        204: "Hot water active",
-        231: "Central Heating ramp down",       # water recirculation after each heating period
-    }
-    status = status_codes.get(displ_code, f"Unknown ({displ_code})")
+    status = describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch)
 
     # determine gas consumption source to facilitate creating template sensors in HA
     using_gas = "false"
