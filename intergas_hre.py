@@ -425,10 +425,10 @@ FAN_RUNNING_RPM = 300   # below this the fan is considered stopped
 seen_status_codes = set()
 burned_since_demand = False   # whether the burner has fired since the current demand started
 
-def describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch):
+def describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch, flow_temp, temp_setpoint):
     """Combine the mode in byte 24 with the burner flags into the phase the service display shows:
-    ignition, burning, fan purge (before ignition or after the flame goes out), setpoint reached (the burner
-    stopped while the demand is still on) or starting (a new demand that has not fired the burner yet)."""
+    ignition, burning, fan purge (before ignition or after the flame goes out), setpoint reached (the water is
+    already at the setpoint, or the burner cut out and waits while the demand is still on) or starting."""
     global burned_since_demand
     if displ_code not in seen_status_codes:
         seen_status_codes.add(displ_code)
@@ -449,7 +449,9 @@ def describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch):
         return f"{mode} active"
     if fan_speed >= FAN_RUNNING_RPM:
         return f"{mode} fan purge"
-    return f"{mode} setpoint reached" if burned_since_demand else f"{mode} starting"
+    if burned_since_demand or flow_temp >= temp_setpoint:
+        return f"{mode} setpoint reached"
+    return f"{mode} starting"
 
 def parse_status_response(s):
     heat_exchanger_temp = getTemp(s[1],s[0])    # not 100% sure it's heat exchanger, could be flue gas temp
@@ -503,7 +505,7 @@ def parse_status_response(s):
     if outside_temp < -50:
         outside_temp = "N/A"
 
-    status = describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch)
+    status = describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch, flow_temp, temp_setpoint)
 
     # determine gas consumption source to facilitate creating template sensors in HA
     using_gas = "false"
