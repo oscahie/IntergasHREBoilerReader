@@ -423,16 +423,20 @@ DEMAND_CODES = {0: "Central Heating", 15: "Central Heating", 37: "Central Heatin
 FAN_RUNNING_RPM = 300   # below this the fan is considered stopped
 
 seen_status_codes = set()
+burned_since_demand = False   # whether the burner has fired since the current demand started
 
 def describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch):
     """Combine the mode in byte 24 with the burner flags into the phase the service display shows:
-    ignition, burning, fan purge (before ignition or after the flame goes out) or setpoint reached."""
+    ignition, burning, fan purge (before ignition or after the flame goes out), setpoint reached (the burner
+    stopped while the demand is still on) or starting (a new demand that has not fired the burner yet)."""
+    global burned_since_demand
     if displ_code not in seen_status_codes:
         seen_status_codes.add(displ_code)
         logger.info(f"Status code {displ_code} seen (gas valve {gas_valve}, spark {spark}, fan {fan_speed} rpm, tap {tap_switch})")
 
     mode = DEMAND_CODES.get(displ_code)
     if mode is None:
+        burned_since_demand = False
         if displ_code not in STATUS_CODES:
             return f"Unknown ({displ_code})"
         if not gas_valve and fan_speed >= FAN_RUNNING_RPM and displ_code not in (85, 170):
@@ -441,10 +445,11 @@ def describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch):
     if spark:
         return f"{mode} ignition"
     if gas_valve:
+        burned_since_demand = True
         return f"{mode} active"
     if fan_speed >= FAN_RUNNING_RPM:
         return f"{mode} fan purge"
-    return f"{mode} setpoint reached"
+    return f"{mode} setpoint reached" if burned_since_demand else f"{mode} starting"
 
 def parse_status_response(s):
     heat_exchanger_temp = getTemp(s[1],s[0])    # not 100% sure it's heat exchanger, could be flue gas temp
