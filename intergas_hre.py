@@ -398,7 +398,7 @@ def get_bool(data, bit):
 # its service display. Values from observation and from Intergas' own gateway (as decoded by incomfort-client).
 STATUS_CODES = {
     0: "Central Heating active",            # heat demand over OpenTherm
-    15: "Central Heating active",           # external boiler demand
+    15: "Hot water storage heating",        # external storage tank ("boiler ext")
     24: "Frost protection",
     37: "Central Heating active",           # RF thermostat demand
     51: "Hot water ramp down",
@@ -413,13 +413,13 @@ STATUS_CODES = {
     204: "Hot water active",
     230: "Central Heating starting",
     231: "Central Heating ramp down",       # fan post-purge and pump post-run after each heating period
-    240: "Hot water storage heating",
+    240: "Hot water storage heating",       # internal storage tank ("boiler int")
     255: "Buffer heating",
 }
 
 # Modes in which the burner is wanted; within them the burner phase is taken from the gas valve, spark and fan
-DEMAND_CODES = {0: "Central Heating", 15: "Central Heating", 37: "Central Heating", 102: "Central Heating",
-                204: "Hot water", 240: "Hot water storage"}
+DEMAND_CODES = {0: "Central Heating", 37: "Central Heating", 102: "Central Heating",
+                15: "Hot water storage", 204: "Hot water", 240: "Hot water storage"}
 
 FAN_RUNNING_RPM = 300   # below this the fan is considered stopped
 
