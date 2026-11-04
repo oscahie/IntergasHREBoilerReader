@@ -403,8 +403,8 @@ STATUS_CODES = {
     37: "Central Heating active",           # RF thermostat demand
     51: "Hot water ramp down",
     85: "Sensor test",
-    102: "Central Heating health-check",    # anti-blockade run once every 24 hours
-    103: "Central Heating setpoint reached",
+    102: "Central Heating active",          # short burns at the boiler's own max heating setpoint
+    103: "Central Heating waiting",
     104: "Central Heating low load",
     126: "Idle",
     127: "Off",
@@ -412,46 +412,42 @@ STATUS_CODES = {
     170: "Service mode",
     204: "Hot water active",
     230: "Central Heating starting",
-    231: "Central Heating ramp down",       # water recirculation after each heating period
+    231: "Central Heating ramp down",       # fan post-purge and pump post-run after each heating period
     240: "Hot water storage heating",
     255: "Buffer heating",
 }
 
 # Modes in which the burner is wanted; within them the burner phase is taken from the gas valve, spark and fan
-DEMAND_CODES = {0: "Central Heating", 15: "Central Heating", 37: "Central Heating", 204: "Hot water", 240: "Hot water storage"}
+DEMAND_CODES = {0: "Central Heating", 15: "Central Heating", 37: "Central Heating", 102: "Central Heating",
+                204: "Hot water", 240: "Hot water storage"}
 
 FAN_RUNNING_RPM = 300   # below this the fan is considered stopped
 
 seen_status_codes = set()
-burned_since_demand = False   # whether the burner has fired since the current demand started
 
-def describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch, flow_temp, temp_setpoint):
-    """Combine the mode in byte 24 with the burner flags into the phase the service display shows:
-    ignition, burning, fan purge (before ignition or after the flame goes out), setpoint reached (the water is
-    already at the setpoint, or the burner cut out and waits while the demand is still on) or starting."""
-    global burned_since_demand
+def describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch):
+    """Combine the mode in byte 24 with the burner flags. During a demand: ignition, active (gas valve open),
+    fan purge (fan running without gas, before ignition or after the flame goes out) or waiting (burner and fan
+    off: the water is above the setpoint or the anti-cycle time is running). Outside a demand the mode itself,
+    except a fan running while idle, which the boiler does when it gets ready for hot water."""
     if displ_code not in seen_status_codes:
         seen_status_codes.add(displ_code)
         logger.info(f"Status code {displ_code} seen (gas valve {gas_valve}, spark {spark}, fan {fan_speed} rpm, tap {tap_switch})")
 
     mode = DEMAND_CODES.get(displ_code)
     if mode is None:
-        burned_since_demand = False
         if displ_code not in STATUS_CODES:
             return f"Unknown ({displ_code})"
-        if not gas_valve and fan_speed >= FAN_RUNNING_RPM and displ_code not in (85, 170):
+        if displ_code == 126 and fan_speed >= FAN_RUNNING_RPM:
             return "Fan purge"
         return STATUS_CODES[displ_code]
     if spark:
         return f"{mode} ignition"
     if gas_valve:
-        burned_since_demand = True
         return f"{mode} active"
     if fan_speed >= FAN_RUNNING_RPM:
         return f"{mode} fan purge"
-    if burned_since_demand or flow_temp >= temp_setpoint:
-        return f"{mode} setpoint reached"
-    return f"{mode} starting"
+    return f"{mode} waiting"
 
 def parse_status_response(s):
     heat_exchanger_temp = getTemp(s[1],s[0])    # not 100% sure it's heat exchanger, could be flue gas temp
@@ -505,7 +501,7 @@ def parse_status_response(s):
     if outside_temp < -50:
         outside_temp = "N/A"
 
-    status = describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch, flow_temp, temp_setpoint)
+    status = describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch)
 
     # determine gas consumption source to facilitate creating template sensors in HA
     using_gas = "false"
