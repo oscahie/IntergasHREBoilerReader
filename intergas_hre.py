@@ -403,7 +403,7 @@ STATUS_CODES = {
     37: "Central Heating active",           # RF thermostat demand
     51: "Hot water ramp down",
     85: "Sensor test",
-    102: "Central Heating active",          # short burns at the boiler's own max heating setpoint
+    102: "Central Heating active",          # CH on the boiler's own demand and max setpoint (not OpenTherm)
     103: "Central Heating waiting",
     104: "Central Heating low load",
     126: "Idle",
@@ -447,6 +447,8 @@ def describe_status(displ_code, gas_valve, spark, fan_speed, tap_switch):
         return f"{mode} active"
     if fan_speed >= FAN_RUNNING_RPM:
         return f"{mode} fan purge"
+    if displ_code == 102:
+        return "Central Heating health-check"   # pump-only run, seen about once every 24 hours
     return f"{mode} waiting"
 
 def parse_status_response(s):
