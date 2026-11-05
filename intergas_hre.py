@@ -419,6 +419,10 @@ STATUS_CODES = {
     255: "Buffer heating",
 }
 
+# Modes in which the boiler heats tap water. Its setpoint then follows the hot water demand instead of the
+# heating circuit, so it is not published as the heating setpoint.
+HOT_WATER_STATUS_CODES = {15, 51, 153, 204, 240}
+
 seen_status_codes = set()
 
 def describe_status(displ_code, gas_valve, fan_speed, tap_switch):
@@ -481,6 +485,9 @@ def parse_status_response(s):
         outside_temp = "N/A"
 
     status = describe_status(displ_code, gas_valve, fan_speed, tap_switch)
+
+    if displ_code in HOT_WATER_STATUS_CODES:
+        temp_setpoint = float('nan')
 
     # determine gas consumption source to facilitate creating template sensors in HA
     using_gas = "false"
